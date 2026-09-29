@@ -12,7 +12,7 @@ from pitot.isa import pressure
 from tqdm.auto import tqdm
 
 # from impunity import impunity
-from ..core.grid import Grid
+from ..core.grid import Grid, close_longitude, to_grid_frame
 
 tempdir = Path(tempfile.gettempdir())
 
@@ -215,12 +215,15 @@ class Arpege(Grid):
         times = pd.to_datetime(df.timestamp).dt.tz_localize(None)
         index = df.index
 
-        df = df.reset_index(drop=True).assign(longitude_360=lambda d: d.longitude % 360)
+        df = df.reset_index(drop=True)
         start = times.min()
         stop = times.max()
 
         # local_dataset = self.sync_local(start, stop)
-        local_dataset = self.select_remote(start.floor("24h"))
+        local_dataset = close_longitude(self.select_remote(start.floor("24h")))
+        df = df.assign(
+            longitude_360=to_grid_frame(df.longitude, local_dataset.longitude)
+        )
         interval = pd.date_range(start.floor("1h"), stop.ceil("1h"), freq="1h")
 
         data_cropped = local_dataset.sel(

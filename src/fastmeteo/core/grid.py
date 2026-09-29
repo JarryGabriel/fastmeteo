@@ -2,8 +2,37 @@ import warnings
 from abc import abstractmethod
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import xarray as xr
+
+
+def to_grid_frame(lon: Any, grid_lon: Any) -> np.ndarray:
+    """Express longitudes in the dataset's own frame ``[lon0, lon0 + 360)``.
+
+    Datasets use different conventions (ARCO ERA5: 0..359.75; ARPEGE 0.1 deg:
+    -32..42), so ``lon % 360`` is only correct for grids starting at 0.
+    """
+    lon0 = float(np.min(np.asarray(grid_lon)))
+    return lon0 + np.mod(np.asarray(lon, dtype=float) - lon0, 360.0)
+
+
+def close_longitude(ds: xr.Dataset) -> xr.Dataset:
+    """Repeat the first longitude 360 deg further east on global grids.
+
+    Without it, points between the last grid longitude and 360 deg (e.g.
+    359.75..360 on a 0.25 deg grid) are extrapolated instead of interpolated
+    towards 0 deg. Regional grids are returned unchanged.
+    """
+    lon = np.asarray(ds.longitude.values, dtype=float)
+    if lon.size < 2:
+        return ds
+    step = float(np.min(np.abs(np.diff(np.sort(lon)))))
+    if abs(float(lon.max() - lon.min()) + step - 360.0) > 1e-6:
+        return ds
+    first = ds.isel(longitude=[int(np.argmin(lon))])
+    first = first.assign_coords(longitude=first.longitude + 360.0)
+    return xr.concat([ds, first], dim="longitude").sortby("longitude")
 
 
 class Grid:
@@ -103,12 +132,14 @@ class Grid:
             .assign(latitude=lambda x: x.latitude.astype(float))
             .assign(longitude=lambda x: x.longitude.astype(float))
             .assign(altitude=lambda x: x.altitude.astype(float))
-            .assign(longitude_360=lambda d: d.longitude % 360)
         )
         start = times.min()
         stop = times.max()
 
-        local_dataset = self.sync_local(start, stop)
+        local_dataset = close_longitude(self.sync_local(start, stop))
+        df = df.assign(
+            longitude_360=to_grid_frame(df.longitude, local_dataset.longitude)
+        )
         interval = pd.date_range(start.floor("1h"), stop.ceil("1h"), freq="1h")
 
         data_cropped = local_dataset.sel(
