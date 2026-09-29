@@ -220,7 +220,7 @@ class Arpege(Grid):
         stop = times.max()
 
         # local_dataset = self.sync_local(start, stop)
-        local_dataset = close_longitude(self.select_remote(start.floor("24h")))
+        local_dataset = self.select_remote(start.floor("24h"))
         df = df.assign(
             longitude_360=to_grid_frame(df.longitude, local_dataset.longitude)
         )
@@ -231,6 +231,7 @@ class Arpege(Grid):
             latitude=slice(df.latitude.max() + 1, df.latitude.min() - 1),
             longitude=slice(df.longitude_360.min() - 1, df.longitude_360.max() + 1),
         )
+        data_cropped = close_longitude(data_cropped, local_dataset)
 
         if data_cropped.time.size == 0:
             RuntimeWarning(f"data from {start} to {stop} is not available.")

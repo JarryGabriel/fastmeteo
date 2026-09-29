@@ -17,22 +17,28 @@ def to_grid_frame(lon: Any, grid_lon: Any) -> np.ndarray:
     return lon0 + np.mod(np.asarray(lon, dtype=float) - lon0, 360.0)
 
 
-def close_longitude(ds: xr.Dataset) -> xr.Dataset:
-    """Repeat the first longitude 360 deg further east on global grids.
+def close_longitude(cropped: xr.Dataset, full: xr.Dataset) -> xr.Dataset:
+    """Append the first longitude, shifted by +360 deg, to a crop of a global grid.
 
     Without it, points between the last grid longitude and 360 deg (e.g.
     359.75..360 on a 0.25 deg grid) are extrapolated instead of interpolated
-    towards 0 deg. Regional grids are returned unchanged.
+    towards 0 deg. Only needed when the crop reaches the last column of a global
+    grid; regional grids and other crops are returned unchanged. Works on the
+    crop only, so a lazily opened dataset is never loaded as a whole.
     """
-    lon = np.asarray(ds.longitude.values, dtype=float)
-    if lon.size < 2:
-        return ds
+    lon = np.asarray(full.longitude.values, dtype=float)
+    if lon.size < 2 or cropped.longitude.size == 0:
+        return cropped
     step = float(np.min(np.abs(np.diff(np.sort(lon)))))
     if abs(float(lon.max() - lon.min()) + step - 360.0) > 1e-6:
-        return ds
-    first = ds.isel(longitude=[int(np.argmin(lon))])
+        return cropped
+    if float(cropped.longitude.max()) < float(lon.max()):
+        return cropped
+    first = full.isel(longitude=[int(np.argmin(lon))]).sel(
+        time=cropped.time, latitude=cropped.latitude
+    )
     first = first.assign_coords(longitude=first.longitude + 360.0)
-    return xr.concat([ds, first], dim="longitude").sortby("longitude")
+    return xr.concat([cropped, first], dim="longitude")
 
 
 class Grid:
@@ -136,7 +142,7 @@ class Grid:
         start = times.min()
         stop = times.max()
 
-        local_dataset = close_longitude(self.sync_local(start, stop))
+        local_dataset = self.sync_local(start, stop)
         df = df.assign(
             longitude_360=to_grid_frame(df.longitude, local_dataset.longitude)
         )
@@ -147,6 +153,7 @@ class Grid:
             latitude=slice(df.latitude.max() + 1, df.latitude.min() - 1),
             longitude=slice(df.longitude_360.min() - 1, df.longitude_360.max() + 1),
         )
+        data_cropped = close_longitude(data_cropped, local_dataset)
 
         if data_cropped.time.size == 0:
             msg = f"data from {start} to {stop} is not available."
