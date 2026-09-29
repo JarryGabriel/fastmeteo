@@ -16,7 +16,10 @@ from ..core.grid import Grid
 
 tempdir = Path(tempfile.gettempdir())
 
-bare_url = "https://object.data.gouv.fr/meteofrance-pnt/pnt/"
+# Official entry point of Météo-France's NWP open data ("Données PNT - rétention
+# 14 jours" on data.gouv.fr). Since May 2026 it answers with a redirect to the
+# object storage that serves the files; object.data.gouv.fr is no longer fed.
+bare_url = "https://files.data.gouv.fr/meteofrance-pnt/pnt/"
 
 # fmt:off
 DEFAULT_LEVELS_37 = [
@@ -28,29 +31,49 @@ DEFAULT_IP1_FEATURES = ['u', 'v', 't', 'r']
 
 
 def download_with_progress(url: str, file: None | Path = None) -> None | BytesIO:
-    with httpx.stream("GET", url) as r:
+    """Download ``url`` into ``file`` (or memory), following redirects.
+
+    The file is written under a temporary name and moved into place only once
+    the download is complete, so an interrupted or failed download never
+    leaves a truncated file that later calls would mistake for valid data.
+    """
+    tmp = file.with_name(file.name + ".part") if file else None
+    with httpx.stream("GET", url, follow_redirects=True, timeout=None) as r:
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"Error downloading data from {url} (HTTP {r.status_code}). "
+                "Check if the requested data is available."
+            )
         total_size = int(r.headers.get("Content-Length", 0))
-        buffer = file.open("wb") if file else BytesIO()
-        with tqdm(
-            total=total_size, unit="B", unit_scale=True, desc=url.split("/")[-1]
-        ) as progress_bar:
-            first_chunk = True
-            for chunk in r.iter_bytes():
-                if first_chunk and chunk.startswith(b"<?xml"):
-                    raise RuntimeError(
-                        f"Error downloading data from {url}. "
-                        "Check if the requested data is available."
-                    )
-                first_chunk = False
-                buffer.write(chunk)
-                progress_bar.update(len(chunk))
+        buffer = tmp.open("wb") if tmp else BytesIO()
+        try:
+            with tqdm(
+                total=total_size, unit="B", unit_scale=True, desc=url.split("/")[-1]
+            ) as progress_bar:
+                first_chunk = True
+                for chunk in r.iter_bytes():
+                    if first_chunk and chunk.lstrip().startswith((b"<?xml", b"<")):
+                        raise RuntimeError(
+                            f"Error downloading data from {url}. "
+                            "Check if the requested data is available."
+                        )
+                    first_chunk = False
+                    buffer.write(chunk)
+                    progress_bar.update(len(chunk))
+        except BaseException:
+            buffer.close()
+            if tmp:
+                tmp.unlink(missing_ok=True)
+            raise
 
-        if isinstance(buffer, BytesIO):
-            buffer.seek(0)
-            return buffer
+    if isinstance(buffer, BytesIO):
+        buffer.seek(0)
+        return buffer
 
-        buffer.close()
-        return None
+    buffer.close()
+    assert tmp is not None and file is not None
+    tmp.replace(file)
+    return None
 
 
 class Arpege(Grid):
